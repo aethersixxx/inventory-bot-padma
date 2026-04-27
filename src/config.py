@@ -11,21 +11,12 @@ load_dotenv()
 
 
 def _parse_ids(raw: str) -> set[int]:
-    """Parse string '123,456' menjadi set of int."""
     if not raw:
         return set()
     return {int(x.strip()) for x in raw.split(",") if x.strip().isdigit()}
 
 
 def _resolve_credentials_path() -> str:
-    """
-    Resolve path ke service-account.json.
-
-    Prioritas:
-    1. GOOGLE_CREDENTIALS_JSON_BASE64 (env var berisi JSON ter-encode base64)
-    2. GOOGLE_CREDENTIALS_JSON (env var berisi JSON plain text)
-    3. GOOGLE_CREDENTIALS_PATH (path file lokal)
-    """
     b64 = os.getenv("GOOGLE_CREDENTIALS_JSON_BASE64", "").strip()
     if b64:
         try:
@@ -46,33 +37,26 @@ def _resolve_credentials_path() -> str:
 
 
 def _write_creds_to_temp(json_content: str) -> str:
-    """Tulis JSON content ke temp file dan return path-nya."""
     fd, path = tempfile.mkstemp(suffix=".json", prefix="gcreds_")
     with os.fdopen(fd, "w") as f:
         f.write(json_content)
     return path
 
 
-# Telegram
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
-# Google Sheets
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Sheet1")
 GOOGLE_CREDENTIALS_PATH = _resolve_credentials_path()
 
-# Access Control
 ADMIN_USER_IDS: set[int] = _parse_ids(os.getenv("ADMIN_USER_IDS", ""))
 ALLOWED_USER_IDS: set[int] = _parse_ids(os.getenv("ALLOWED_USER_IDS", ""))
 
-# Cache
 CACHE_TTL = int(os.getenv("CACHE_TTL", "30"))
 
-# Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FILE = os.getenv("LOG_FILE", "logs/bot.log")
 
-# Gemini AI
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 AI_ENABLED = bool(GEMINI_API_KEY)
