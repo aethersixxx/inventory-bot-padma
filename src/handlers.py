@@ -27,7 +27,7 @@ _last_results: TTLCache = TTLCache(maxsize=500, ttl=600)
 
 # Default page size & detail mode threshold
 _PAGE_SIZE = 10               # berapa item per "page"
-_COMPACT_THRESHOLD = 6        # > N hasil → pakai compact mode (1 item = 1 baris)
+_COMPACT_THRESHOLD = 0        # > N hasil → pakai compact mode (1 item = 1 baris)
 
 # Keyword yang dikenali sebagai "tampilkan semua" / "lanjut"
 _SHOW_MORE_KEYWORDS = {
