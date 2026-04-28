@@ -27,7 +27,7 @@ _last_results: TTLCache = TTLCache(maxsize=500, ttl=600)
 
 # Default page size & detail mode threshold
 _PAGE_SIZE = 10               # berapa item per "page"
-_COMPACT_THRESHOLD = 3        # > N hasil → pakai compact mode (1 item = 1 baris)
+_COMPACT_THRESHOLD = 6        # > N hasil → pakai compact mode (1 item = 1 baris)
 
 # Keyword yang dikenali sebagai "tampilkan semua" / "lanjut"
 _SHOW_MORE_KEYWORDS = {
@@ -424,7 +424,8 @@ def _format_compact(rows: list[dict], start_index: int = 1) -> str:
 
     Format:
       1. Nama Mesin · Model · Tipe Mesin · 📍 Lokasi
-         SN: serial_number
+         PN: part_number  (kalau ada)
+         SN: serial_number  (kalau ada)
          ↳ Status Terakhir (kalau ada)
     """
     lines = []
@@ -433,6 +434,7 @@ def _format_compact(rows: list[dict], start_index: int = 1) -> str:
         model = str(row.get("Model", "")).strip()
         tipe = str(row.get("Tipe Mesin", "")).strip()
         lokasi = str(row.get("Lokasi", "")).strip() or "-"
+        pn = str(row.get("Part Number", "")).strip()
         sn = str(row.get("Serial Number", "")).strip()
         status_terakhir = str(row.get("Status Terakhir", "")).strip()
 
@@ -446,10 +448,13 @@ def _format_compact(rows: list[dict], start_index: int = 1) -> str:
         head = " · ".join(head_parts)
 
         line = head
-        # Baris 2: SN
+        # Baris berikutnya: PN dulu (lebih sering relevan untuk identifikasi cepat),
+        # lalu SN
+        if pn and pn != "-":
+            line += f"\n   PN: `{_md(pn)}`"
         if sn and sn != "-":
             line += f"\n   SN: `{_md(sn)}`"
-        # Baris 3: Status Terakhir (opsional)
+        # Baris terakhir: Status Terakhir (opsional)
         if status_terakhir and status_terakhir != "-":
             line += f"\n   ↳ _{_md(status_terakhir)}_"
         lines.append(line)
