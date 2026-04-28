@@ -156,7 +156,10 @@ Aturan:
   pada satu kolom, gunakan op="in" dengan array "values".
   Contoh: "di limus atau commpark" → {{"field": "Lokasi", "op": "in", "values": ["limus", "commpark"]}}
 - MULTI-FILTER (AND): filters yang berbeda field di-AND-kan (mis. status rusak DAN lokasi limus)
-- Kalau user sebut kode/model spesifik (D320, ABC-123) tanpa info lokasi → pakai "free_text"
+- KEYWORD SPESIFIK (kode/model/serial seperti D320, Cypress2, ABC-123, HXDM251004):
+  * SELALU pakai "free_text", JANGAN bikin filter struktur
+  * Karena kita tidak tahu pasti keyword itu ada di kolom Nama Mesin / Model / Serial Number / dll
+  * Biarkan sistem cari di semua kolom searchable
 - Kalau user nyebut nama tempat/proyek/perusahaan → COCOKKAN dengan sample values:
   * Kalau nilainya muncul di "Lokasi" → filter Lokasi
   * Kalau muncul di "Status Terakhir" → filter Status Terakhir
@@ -172,6 +175,10 @@ CONTOH PARSING (singkat):
   → {{"filters":[{{"field":"Lokasi","op":"in","values":["limus","commpark"]}}],"free_text":"santak ups","aggregation":"count","limit":50,"explanation":"Total Santak UPS di Limus atau Commpark"}}
 - "list barang rusak di gudang A"
   → {{"filters":[{{"field":"Status","op":"contains","value":"rusak"}},{{"field":"Lokasi","op":"contains","value":"gudang A"}}],"free_text":null,"aggregation":"list","limit":50,"explanation":"Daftar barang rusak di Gudang A"}}
+- "mesin yang mengandung nama Cypress2"
+  → {{"filters":[],"free_text":"Cypress2","aggregation":"list","limit":50,"explanation":"Mesin yang mengandung Cypress2"}}
+- "barang dengan kode HXDM251004"
+  → {{"filters":[],"free_text":"HXDM251004","aggregation":"none","limit":50,"explanation":"Barang dengan kode HXDM251004"}}
 
 Pertanyaan user: "{query}"
 
@@ -371,33 +378,37 @@ def execute_filter(parsed: dict, all_records: list[dict]) -> list[dict]:
                         break
             results = filtered
 
-    # SAFETY NET: kalau hasil 0 tapi punya filter values, coba cari value
-    # tersebut di kolom-kolom yang sering jadi tempat info lokasi/keterangan.
+    # SAFETY NET: kalau hasil 0 tapi punya filter values, coba retry dengan
+    # mencari value tersebut di SEMUA kolom searchable (bukan cuma kolom yang
+    # ditarget Gemini). Berguna kalau Gemini salah pilih kolom — misal cari
+    # "Cypress2" di kolom Nama Mesin padahal datanya di kolom Model.
     if not results and filter_values:
-        FALLBACK_FIELDS = [
-            "Lokasi", "Status Terakhir", "Keterangan", "Nama Mesin", "Model"
-        ]
-        for row in all_records:
-            blob = " ".join(
-                str(row.get(f, "")).lower() for f in FALLBACK_FIELDS
-            )
-            # Untuk safety net: kalau ada multi-value (OR), match salah satu cukup;
-            # kalau single value, harus match semua filter_values.
-            # Asumsikan OR-logic untuk safety net (lebih permisif).
-            if any(v in blob for v in filter_values):
-                # Cek juga free_text kalau ada
-                if free_text:
-                    if free_text not in blob and not all(
-                        t in blob for t in free_text.split()
-                    ):
-                        continue
-                results.append(row)
-        if results:
-            logger.info(
-                "Safety net aktif: filter Gemini 0 hasil, fallback ke multi-field "
-                "match menemukan %d hasil",
-                len(results),
-            )
+        from src.sheets import SEARCHABLE_FIELDS, _tokenize
+
+        # Gabungkan semua filter values jadi tokens
+        combined_tokens: list[str] = []
+        for v in filter_values:
+            combined_tokens.extend(_tokenize(v) or [v])
+
+        if combined_tokens:
+            for row in all_records:
+                blob = " ".join(
+                    str(row.get(f, "")).lower() for f in SEARCHABLE_FIELDS
+                )
+                # Match kalau salah satu token muncul (lebih permisif untuk safety net)
+                if any(t in blob for t in combined_tokens):
+                    # Kalau ada free_text juga, cek juga
+                    if free_text:
+                        ft_tokens = _tokenize(free_text)
+                        if ft_tokens and not all(t in blob for t in ft_tokens):
+                            continue
+                    results.append(row)
+            if results:
+                logger.info(
+                    "Safety net aktif: filter Gemini 0 hasil, fallback ke "
+                    "multi-field search menemukan %d hasil",
+                    len(results),
+                )
 
     # Apply limit
     limit = parsed.get("limit") or 50
