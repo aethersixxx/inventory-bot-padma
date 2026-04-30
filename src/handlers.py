@@ -6,7 +6,11 @@ from __future__ import annotations
 import time
 from cachetools import TTLCache
 
-from telegram import Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
@@ -27,7 +31,9 @@ _last_results: TTLCache = TTLCache(maxsize=500, ttl=600)
 
 # Default page size & detail mode threshold
 _PAGE_SIZE = 10               # berapa item per "page"
-_COMPACT_THRESHOLD = 0        # > N hasil → pakai compact mode (1 item = 1 baris)
+_COMPACT_THRESHOLD = 0        # > N hasil → pakai compact mode.
+                              # Set 0 = compact mode SELALU dipakai (konsisten),
+                              # naikkan jika mau detail penuh untuk hasil sedikit.
 
 # Keyword yang dikenali sebagai "tampilkan semua" / "lanjut"
 _SHOW_MORE_KEYWORDS = {
@@ -64,11 +70,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"{ai_status}\n\n"
         "📖 *Cara pakai:*\n"
         "• Ketik kode/nama spesifik → cari literal\n"
-        "  `D320` · `Mesin Cypress2` · `Laser Firstjet`\n"
+        "  `D320` · `compressor` · `BAUT`\n"
         "• Ketik pertanyaan → AI akan parse otomatis\n"
         "  `barang apa saja yang ada D320?`\n"
-        "  `ada berapa mesin yang Trial?`\n"
-        "  `list semua di gudang Limus atau Commpark`\n\n"
+        "  `ada berapa mesin yang rusak?`\n"
+        "  `list semua di gudang A`\n\n"
         "Pencarian tidak case-sensitive & support partial match.\n"
         "Ketik /help untuk command lengkap."
     )
@@ -270,20 +276,18 @@ async def _do_search(update: Update, query: str) -> None:
         )
         return
 
-    # ========== Default path: list / none ==========
-    # Simpan ke session untuk support "tampilkan semua" nanti
+    # ========== Default path: list / none — interactive UI ==========
+    # Simpan ke session dengan struktur baru untuk support tombol interaktif
     _last_results[user_id] = {
         "query": query,
         "results": results,
-        "shown": 0,
+        "header_msg": header_msg,
+        "page": 1,
+        # filter & filtered_results di-set saat user tap tombol filter
     }
 
-    # Kirim header (kalau ada)
-    if header_msg:
-        await update.message.reply_text(header_msg, parse_mode=ParseMode.MARKDOWN)
-
-    # Kirim hasil halaman pertama
-    await _send_results_page(update, user_id)
+    # Render dengan inline keyboard
+    await _render_search_result(update, _last_results[user_id], user_id, edit=False)
 
     logger.info("SEARCH '%s' → %d hasil (%.0fms, ai=%s)", query, len(results), elapsed, use_ai)
 
@@ -417,17 +421,60 @@ async def _send_more_results(update: Update, user_id: int) -> None:
     await _send_results_page(update, user_id)
 
 
-def _format_compact(rows: list[dict], start_index: int = 1) -> str:
-    """
-    Format compact: 1 entry per item, info penting saja.
-    Berguna saat hasil banyak agar tidak spam puluhan pesan.
+def _status_emoji(status: str) -> str:
+    """Map status text → emoji status indicator."""
+    s = status.lower().strip()
+    if not s or s == "-":
+        return "⚪"
+    if "aktif" in s or "available" in s or "tersedia" in s:
+        return "🟢"
+    if "rusak" in s or "broken" in s or "error" in s:
+        return "🔴"
+    if "trial" in s or "pinjam" in s or "rental" in s:
+        return "🟡"
+    if "stok" in s or "stock" in s:
+        return "🟢"
+    return "⚪"
 
-    Format:
-      1. Nama Mesin · Model · Tipe Mesin · 📍 Lokasi
-         PN: part_number  (kalau ada)
-         SN: serial_number  (kalau ada)
-         ↳ Status Terakhir (kalau ada)
+
+def _highlight_keyword(text: str, keyword: str) -> str:
     """
+    Bold-kan keyword di text (case-insensitive).
+    Pakai markdown bold *...*. Skip kalau keyword < 2 char (terlalu generic).
+    """
+    if not keyword or len(keyword) < 2 or not text:
+        return text
+    # Find case-insensitive
+    text_lower = text.lower()
+    kw_lower = keyword.lower()
+    if kw_lower not in text_lower:
+        return text
+    # Replace dengan preserve case asli
+    result = ""
+    i = 0
+    while i < len(text):
+        if text_lower[i:i+len(kw_lower)] == kw_lower:
+            result += f"*{text[i:i+len(kw_lower)]}*"
+            i += len(kw_lower)
+        else:
+            result += text[i]
+            i += 1
+    return result
+
+
+def _format_compact(
+    rows: list[dict], start_index: int = 1, highlight: str = ""
+) -> str:
+    """
+    Format compact dengan:
+    - Emoji status (🟢 Aktif, 🔴 Rusak, 🟡 Trial, ⚪ Lainnya)
+    - Separator divider antar item
+    - Highlight keyword pencarian (bold)
+    - Layout rapi
+    """
+    if not rows:
+        return ""
+
     lines = []
     for i, row in enumerate(rows, start=start_index):
         nama = str(row.get("Nama Mesin", "")).strip() or "-"
@@ -436,29 +483,366 @@ def _format_compact(rows: list[dict], start_index: int = 1) -> str:
         lokasi = str(row.get("Lokasi", "")).strip() or "-"
         pn = str(row.get("Part Number", "")).strip()
         sn = str(row.get("Serial Number", "")).strip()
+        status = str(row.get("Status", "")).strip()
         status_terakhir = str(row.get("Status Terakhir", "")).strip()
 
-        # Baris 1: Nama · Model · Tipe · Lokasi
-        head_parts = [f"*{i}.* {_md(nama)}"]
-        if model and model != "-":
-            head_parts.append(_md(model))
-        if tipe and tipe != "-":
-            head_parts.append(_md(tipe))
-        head_parts.append(f"📍 {_md(lokasi)}")
-        head = " · ".join(head_parts)
+        emoji = _status_emoji(status)
 
-        line = head
-        # Baris berikutnya: PN dulu (lebih sering relevan untuk identifikasi cepat),
-        # lalu SN
+        # Apply highlight ke field yang sering match keyword
+        nama_h = _highlight_keyword(_md(nama), highlight) if highlight else _md(nama)
+        model_h = _highlight_keyword(_md(model), highlight) if highlight else _md(model)
+        pn_h = _highlight_keyword(_md(pn), highlight) if highlight else _md(pn)
+
+        # Baris 1: emoji + nomor + nama (highlighted)
+        header_parts = [f"{emoji} *{i}.* {nama_h}"]
+        if model and model != "-":
+            header_parts.append(model_h)
+        if tipe and tipe != "-":
+            header_parts.append(_md(tipe))
+        line = " · ".join(header_parts)
+
+        # Baris 2: lokasi · status
+        meta_parts = [f"📍 {_md(lokasi)}"]
+        if status and status != "-":
+            meta_parts.append(_md(status))
+        line += "\n   " + " · ".join(meta_parts)
+
+        # Baris 3+: PN, SN
         if pn and pn != "-":
-            line += f"\n   PN: `{_md(pn)}`"
+            line += f"\n   🏷️ `{pn_h if highlight else _md(pn)}`"
         if sn and sn != "-":
-            line += f"\n   SN: `{_md(sn)}`"
-        # Baris terakhir: Status Terakhir (opsional)
+            line += f"\n   🔢 `{_md(sn)}`"
+
+        # Baris terakhir: Status Terakhir / Keterangan
         if status_terakhir and status_terakhir != "-":
-            line += f"\n   ↳ _{_md(status_terakhir)}_"
+            line += f"\n   💬 _{_md(status_terakhir)}_"
+
         lines.append(line)
+
+    # Pisah antar item dengan divider tipis
     return "\n\n".join(lines)
+
+
+def _format_detail(row: dict) -> str:
+    """
+    Format detail penuh untuk satu item. Dipakai saat user tap tombol "Detail".
+    Menampilkan semua 10 field rapi.
+    """
+    nama = str(row.get("Nama Mesin", "")).strip() or "-"
+    status = str(row.get("Status", "")).strip()
+    emoji = _status_emoji(status)
+
+    fields = [
+        ("Nama Mesin", "Nama Mesin"),
+        ("Model", "Model"),
+        ("Merk", "Merk"),
+        ("Tipe Mesin", "Tipe Mesin"),
+        ("Part Number", "Part Number"),
+        ("Serial Number", "Serial Number"),
+        ("Lokasi", "Lokasi"),
+        ("Status", "Status"),
+        ("Keterangan", "Keterangan"),
+        ("Status Terakhir", "Status Terakhir"),
+    ]
+
+    lines = [f"{emoji} *Detail Barang*", "━━━━━━━━━━━━━━━━━━"]
+    for label, key in fields:
+        value = str(row.get(key, "")).strip()
+        if not value:
+            value = "-"
+        # PN & SN pakai code formatting
+        if key in ("Part Number", "Serial Number") and value != "-":
+            lines.append(f"*{label}:* `{_md(value)}`")
+        else:
+            lines.append(f"*{label}:* {_md(value)}")
+
+    return "\n".join(lines)
+
+
+def _build_search_keyboard(
+    user_id: int, page: int, total_pages: int,
+    items_on_page: int, has_filter: bool = False,
+) -> InlineKeyboardMarkup | None:
+    """
+    Build inline keyboard untuk hasil pencarian.
+
+    Layout:
+      Row 1: tombol detail per item ([1] [2] [3] [4] [5]) -- max 5
+      Row 2: ⬅️ Sebelumnya | ➡️ Lanjut
+      Row 3: 🟢 Aktif | 🔴 Rusak  (atau ✖️ Hapus Filter kalau sudah filter)
+      Row 4: 🔄 Refresh | ❌ Tutup
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+
+    # Row 1: Tombol detail per item (max 5 di halaman ini)
+    if items_on_page > 0:
+        start_idx = (page - 1) * _PAGE_SIZE
+        max_detail = min(items_on_page, 5)
+        detail_buttons = []
+        for i in range(max_detail):
+            global_idx = start_idx + i
+            local_num = i + 1 + start_idx
+            detail_buttons.append(
+                InlineKeyboardButton(
+                    f"📄 #{local_num}",
+                    callback_data=f"detail:{user_id}:{global_idx}",
+                )
+            )
+        rows.append(detail_buttons)
+
+    # Row 2: Pagination
+    pagination_row = []
+    if page > 1:
+        pagination_row.append(
+            InlineKeyboardButton(
+                "⬅️ Sebelumnya",
+                callback_data=f"page:{user_id}:{page - 1}",
+            )
+        )
+    if page < total_pages:
+        pagination_row.append(
+            InlineKeyboardButton(
+                "➡️ Lanjut",
+                callback_data=f"page:{user_id}:{page + 1}",
+            )
+        )
+    if pagination_row:
+        rows.append(pagination_row)
+
+    # Row 3: Filter cepat
+    if not has_filter:
+        rows.append([
+            InlineKeyboardButton("🟢 Aktif", callback_data=f"filter:{user_id}:aktif"),
+            InlineKeyboardButton("🔴 Rusak", callback_data=f"filter:{user_id}:rusak"),
+        ])
+    else:
+        rows.append([
+            InlineKeyboardButton(
+                "✖️ Hapus Filter",
+                callback_data=f"filter:{user_id}:reset",
+            ),
+        ])
+
+    # Row 4: Action buttons
+    rows.append([
+        InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh:{user_id}:0"),
+        InlineKeyboardButton("❌ Tutup", callback_data=f"close:{user_id}:0"),
+    ])
+
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+def _build_detail_keyboard(user_id: int, item_index: int) -> InlineKeyboardMarkup:
+    """Keyboard untuk view detail satu item — tombol kembali ke list."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "⬅️ Kembali ke Hasil",
+                callback_data=f"back:{user_id}:0",
+            )
+        ]
+    ])
+
+
+# ---------- Callback handler (handler tap tombol inline keyboard) ----------
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handler untuk tap tombol inline keyboard.
+    Format callback_data: "action:user_id:param"
+    """
+    query = update.callback_query
+    if not query or not query.data:
+        return
+
+    await query.answer()  # Hilangkan loading spinner
+
+    try:
+        action, owner_id_str, param = query.data.split(":", 2)
+        owner_id = int(owner_id_str)
+    except (ValueError, IndexError):
+        return
+
+    user_id = update.effective_user.id if update.effective_user else 0
+    if user_id != owner_id:
+        await query.answer(
+            "⛔ Tombol ini bukan untuk kamu. Search sendiri ya.",
+            show_alert=True,
+        )
+        return
+
+    session = _last_results.get(user_id)
+    if not session:
+        await query.answer(
+            "⏰ Hasil pencarian sudah expired. Silakan search ulang.",
+            show_alert=True,
+        )
+        try:
+            await query.edit_message_text(
+                "⏰ _Hasil pencarian sudah expired. Silakan search ulang._",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception:
+            pass
+        return
+
+    logger.info("CALLBACK %s param=%s dari %s", action, param, _user_info(update))
+
+    if action == "page":
+        try:
+            new_page = int(param)
+        except ValueError:
+            return
+        session["page"] = new_page
+        await _render_search_result(query, session, user_id, edit=True)
+
+    elif action == "detail":
+        try:
+            idx = int(param)
+        except ValueError:
+            return
+        results = session.get("filtered_results") or session["results"]
+        if 0 <= idx < len(results):
+            row = results[idx]
+            text = _format_detail(row)
+            keyboard = _build_detail_keyboard(user_id, idx)
+            try:
+                await query.edit_message_text(
+                    text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard
+                )
+            except Exception as e:
+                logger.warning("edit_message gagal: %s", e)
+
+    elif action == "back":
+        await _render_search_result(query, session, user_id, edit=True)
+
+    elif action == "filter":
+        if param == "reset":
+            session.pop("filter", None)
+            session.pop("filtered_results", None)
+        else:
+            session["filter"] = param
+            base_results = session["results"]
+            session["filtered_results"] = [
+                r for r in base_results
+                if param.lower() in str(r.get("Status", "")).lower()
+            ]
+        session["page"] = 1
+        await _render_search_result(query, session, user_id, edit=True)
+
+    elif action == "refresh":
+        sheets_client.invalidate_cache()
+        original_query = session.get("query", "")
+        session.pop("filter", None)
+        session.pop("filtered_results", None)
+        try:
+            await query.edit_message_text(
+                "🔄 _Refreshing data..._", parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception:
+            pass
+        # Re-execute search
+        if config.AI_ENABLED and is_natural_language_query(original_query):
+            results, header_msg, _ = await _ai_search(original_query)
+        else:
+            results, header_msg = _literal_search(original_query)
+        session["results"] = results
+        session["header_msg"] = header_msg
+        session["page"] = 1
+        await _render_search_result(query, session, user_id, edit=True)
+
+    elif action == "close":
+        try:
+            await query.edit_message_text(
+                "✅ _Pencarian ditutup._", parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception:
+            pass
+        _last_results.pop(user_id, None)
+
+
+async def _render_search_result(
+    callback_or_update,
+    session: dict,
+    user_id: int,
+    edit: bool = False,
+) -> None:
+    """
+    Render hasil pencarian dengan inline keyboard.
+    edit=False → reply baru. edit=True → edit pesan existing (untuk callback).
+    """
+    results = session.get("filtered_results") or session["results"]
+    page = session.get("page", 1)
+    has_filter = bool(session.get("filter"))
+    filter_label = session.get("filter", "")
+    query_text = session.get("query", "")
+
+    total = len(results)
+    if total == 0:
+        text = "❌ *Tidak ada hasil yang cocok dengan filter ini.*"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "✖️ Hapus Filter",
+                callback_data=f"filter:{user_id}:reset",
+            )]
+        ])
+        if edit:
+            try:
+                await callback_or_update.edit_message_text(
+                    text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard
+                )
+            except Exception:
+                pass
+        else:
+            await callback_or_update.message.reply_text(
+                text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard
+            )
+        return
+
+    total_pages = max(1, (total + _PAGE_SIZE - 1) // _PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    session["page"] = page
+
+    start_idx = (page - 1) * _PAGE_SIZE
+    end_idx = min(start_idx + _PAGE_SIZE, total)
+    page_items = results[start_idx:end_idx]
+
+    # Header dengan separator
+    header = "━━━━━━━━━━━━━━━━━━━━\n"
+    header += f"🔍 *Hasil pencarian:* `{_md(query_text)}`\n"
+    if has_filter:
+        header += f"🏷️ *Filter:* {filter_label.title()}\n"
+    header += f"📊 *{total}* item ditemukan"
+    if total_pages > 1:
+        header += f"  ·  Halaman *{page}/{total_pages}*"
+    header += "\n━━━━━━━━━━━━━━━━━━━━\n\n"
+
+    # Body
+    body = _format_compact(page_items, start_index=start_idx + 1, highlight=query_text)
+    text = header + body
+
+    # Truncate kalau lebih dari Telegram limit
+    if len(text) > 4000:
+        text = text[:3990] + "\n\n_...terpotong_"
+
+    keyboard = _build_search_keyboard(
+        user_id=user_id,
+        page=page,
+        total_pages=total_pages,
+        items_on_page=len(page_items),
+        has_filter=has_filter,
+    )
+
+    if edit:
+        try:
+            await callback_or_update.edit_message_text(
+                text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard
+            )
+        except Exception as e:
+            logger.debug("edit_message gagal: %s", e)
+    else:
+        await callback_or_update.message.reply_text(
+            text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard
+        )
 
 
 def _md(s: str) -> str:
