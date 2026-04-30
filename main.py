@@ -3,6 +3,7 @@ Entry point Inventory Telegram Bot.
 """
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
     filters,
@@ -32,6 +33,9 @@ def main() -> None:
     app.add_handler(CommandHandler("update", handlers.cmd_update))
     app.add_handler(CommandHandler("refresh", handlers.cmd_refresh))
 
+    # Inline keyboard callbacks (tombol detail, paging, filter, dll)
+    app.add_handler(CallbackQueryHandler(handlers.handle_callback))
+
     # Free text → search
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.handle_text)
@@ -41,7 +45,7 @@ def main() -> None:
     app.add_error_handler(handlers.on_error)
 
     logger.info("Bot polling started...")
-    app.run_polling(allowed_updates=["message"])
+    app.run_polling(allowed_updates=["message", "callback_query"])
 
 
 if __name__ == "__main__":
