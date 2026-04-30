@@ -126,10 +126,11 @@ class SheetsClient:
         """
         Ambil semua data dari sheet (dengan cache).
 
-        PENTING: Pakai value_render_option='FORMATTED_VALUE' untuk paksa Google
-        Sheets return semua cell sebagai string ter-format. Tanpa ini, cell
-        seperti '507E91404305' akan dibaca sebagai scientific notation float
-        (5.07e+91404305 = infinity), dan jadi 'inf' di Python.
+        PENTING: Pakai get_all_values() langsung (raw string) lalu construct
+        dict manual. gspread.get_all_records() — bahkan dengan FORMATTED_VALUE
+        — kadang masih convert cell yang match pola scientific notation
+        (mis. '507E91404305') jadi infinity. Cara aman: ambil sebagai string
+        mentah, biarkan Python jangan auto-convert.
         """
         with self._lock:
             if not force_refresh and "all_records" in self._cache:
@@ -138,13 +139,44 @@ class SheetsClient:
 
             logger.debug("Cache MISS: fetching dari Google Sheets")
             ws = self._get_worksheet()
-            # FORMATTED_VALUE: ambil nilai sesuai tampilan di sheet (string)
-            # → cegah auto-convert kode seperti "507E91404305" jadi infinity
-            records = ws.get_all_records(
+
+            # Ambil semua cell sebagai string (FORMATTED_VALUE dijamin string)
+            all_values = ws.get_all_values(
                 value_render_option="FORMATTED_VALUE"
             )
+
+            if not all_values:
+                logger.warning("Sheet kosong")
+                self._cache["all_records"] = []
+                return []
+
+            # Row pertama = header
+            headers = [str(h).strip() for h in all_values[0]]
+            data_rows = all_values[1:]
+
+            # Build list of dict, semua value sebagai string
+            records: list[dict] = []
+            for row in data_rows:
+                # Pad row dengan empty string kalau kolom kurang
+                padded = list(row) + [""] * (len(headers) - len(row))
+                rec = {
+                    headers[i]: str(padded[i]).strip()
+                    for i in range(len(headers))
+                }
+                records.append(rec)
+
             self._cache["all_records"] = records
             logger.info("Loaded %d baris dari Google Sheets", len(records))
+
+            # Debug: log 1 sample SN supaya kita tahu data ke-load benar
+            if records and "Serial Number" in headers:
+                samples = [
+                    r.get("Serial Number", "")
+                    for r in records[:5]
+                    if r.get("Serial Number")
+                ]
+                logger.debug("Sample SN: %s", samples)
+
             return records
 
     def invalidate_cache(self) -> None:
