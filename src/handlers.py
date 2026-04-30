@@ -813,6 +813,12 @@ async def _render_search_result(
     header += f"📊 *{total}* item ditemukan"
     if total_pages > 1:
         header += f"  ·  Halaman *{page}/{total_pages}*"
+
+    # Last modified info (optional, gak block kalau gagal)
+    last_mod = sheets_client.get_last_modified()
+    if last_mod:
+        header += f"\n🕒 _Data diupdate: {last_mod}_"
+
     header += "\n━━━━━━━━━━━━━━━━━━━━\n\n"
 
     # Body
