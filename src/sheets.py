@@ -123,7 +123,14 @@ class SheetsClient:
 
     # ---------- data ----------
     def get_all_records(self, force_refresh: bool = False) -> list[dict]:
-        """Ambil semua data dari sheet (dengan cache)."""
+        """
+        Ambil semua data dari sheet (dengan cache).
+
+        PENTING: Pakai value_render_option='FORMATTED_VALUE' untuk paksa Google
+        Sheets return semua cell sebagai string ter-format. Tanpa ini, cell
+        seperti '507E91404305' akan dibaca sebagai scientific notation float
+        (5.07e+91404305 = infinity), dan jadi 'inf' di Python.
+        """
         with self._lock:
             if not force_refresh and "all_records" in self._cache:
                 logger.debug("Cache HIT: all_records")
@@ -131,8 +138,11 @@ class SheetsClient:
 
             logger.debug("Cache MISS: fetching dari Google Sheets")
             ws = self._get_worksheet()
-            # get_all_records() pakai row 1 sebagai header
-            records = ws.get_all_records()
+            # FORMATTED_VALUE: ambil nilai sesuai tampilan di sheet (string)
+            # → cegah auto-convert kode seperti "507E91404305" jadi infinity
+            records = ws.get_all_records(
+                value_render_option="FORMATTED_VALUE"
+            )
             self._cache["all_records"] = records
             logger.info("Loaded %d baris dari Google Sheets", len(records))
             return records
@@ -298,6 +308,23 @@ sheets_client = SheetsClient()
 
 
 # ---------- formatting helper ----------
+# Set nilai-nilai yang dianggap "tidak valid" dan harus ditampilkan sebagai "-"
+# (terjadi kalau data sheet ke-cache sebelum fix FORMATTED_VALUE)
+_INVALID_VALUES = {"inf", "-inf", "nan", "infinity", "-infinity"}
+
+
+def _clean_value(value) -> str:
+    """
+    Bersihkan nilai cell. Return string ter-strip.
+    Kalau nilai adalah sentinel invalid (inf/nan dari scientific notation
+    yang ke-corrupt), return string kosong.
+    """
+    s = str(value).strip()
+    if s.lower() in _INVALID_VALUES:
+        return ""
+    return s
+
+
 def format_item(row: dict) -> str:
     """
     Format satu baris data jadi pesan Telegram (Markdown).
@@ -308,11 +335,11 @@ def format_item(row: dict) -> str:
     """
     lines = ["📦 *Detail Barang*", ""]
     for field in DISPLAY_FIELDS:
-        value = str(row.get(field, "")).strip()
+        value = _clean_value(row.get(field, ""))
 
         # Logika khusus Status Terakhir
         if field == "Status Terakhir" and not value:
-            lokasi = str(row.get("Lokasi", "")).strip()
+            lokasi = _clean_value(row.get("Lokasi", ""))
             value = lokasi if lokasi else "-"
 
         if not value:
