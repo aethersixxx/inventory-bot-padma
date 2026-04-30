@@ -184,6 +184,56 @@ class SheetsClient:
             self._cache.clear()
             logger.info("Cache di-invalidate")
 
+    # ---------- metadata ----------
+    def get_last_modified(self) -> Optional[str]:
+        """
+        Ambil timestamp terakhir sheet diubah (dari Google Drive API).
+        Return string format: "30 Apr 2026 14:30 WIB"
+        Return None kalau gagal (gak block bot, optional info).
+
+        Cache dipisah dari data records, TTL 60 detik agar tidak spam API.
+        """
+        with self._lock:
+            cache_key = "last_modified_str"
+            if cache_key in self._cache:
+                return self._cache[cache_key]
+
+            try:
+                # Ambil credentials yang sama dengan gspread
+                creds = Credentials.from_service_account_file(
+                    config.GOOGLE_CREDENTIALS_PATH, scopes=SCOPES
+                )
+                # Build Drive API client lazily
+                from googleapiclient.discovery import build
+                drive = build("drive", "v3", credentials=creds, cache_discovery=False)
+
+                # Ambil metadata file
+                file_meta = drive.files().get(
+                    fileId=config.GOOGLE_SHEET_ID,
+                    fields="modifiedTime",
+                    supportsAllDrives=True,
+                ).execute()
+
+                modified_iso = file_meta.get("modifiedTime", "")
+                if not modified_iso:
+                    return None
+
+                # Parse ISO8601 timestamp (UTC) → format WIB
+                formatted = _format_jakarta_time(modified_iso)
+                self._cache[cache_key] = formatted
+                logger.debug("Sheet last modified: %s", formatted)
+                return formatted
+
+            except ImportError:
+                logger.warning(
+                    "google-api-python-client tidak terinstall. "
+                    "Last modified tidak tersedia."
+                )
+                return None
+            except Exception as e:
+                logger.warning("Gagal ambil sheet metadata: %s", e)
+                return None
+
     # ---------- pencarian ----------
     def search(self, query: str) -> list[dict]:
         """
@@ -333,6 +383,44 @@ class SheetsClient:
             "UPDATE: row %d, kolom %s → %s", target_row_idx, target_col_name, quantity
         )
         return True
+
+
+# ---------- helper untuk format timezone ----------
+# Bulan dalam Bahasa Indonesia (singkat)
+_MONTH_NAMES_ID = {
+    1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "Mei", 6: "Jun",
+    7: "Jul", 8: "Agu", 9: "Sep", 10: "Okt", 11: "Nov", 12: "Des",
+}
+
+
+def _format_jakarta_time(iso_utc: str) -> str:
+    """
+    Convert ISO8601 UTC timestamp → format WIB.
+
+    Input:  "2026-04-30T07:30:45.123Z"
+    Output: "30 Apr 2026 14:30 WIB"
+    """
+    from datetime import datetime, timezone, timedelta
+
+    try:
+        # Parse ISO8601 (handle baik dengan/tanpa milliseconds)
+        # Trim 'Z' dan replace dengan timezone offset eksplisit
+        clean = iso_utc.rstrip("Z")
+        # fromisoformat handle milliseconds otomatis di Python 3.11+
+        # tapi untuk safety, drop milliseconds kalau ada
+        if "." in clean:
+            clean = clean.split(".")[0]
+        dt_utc = datetime.fromisoformat(clean).replace(tzinfo=timezone.utc)
+
+        # Convert ke WIB (UTC+7)
+        wib = timezone(timedelta(hours=7))
+        dt_wib = dt_utc.astimezone(wib)
+
+        # Format: "30 Apr 2026 14:30 WIB"
+        bulan = _MONTH_NAMES_ID.get(dt_wib.month, dt_wib.strftime("%b"))
+        return f"{dt_wib.day} {bulan} {dt_wib.year} {dt_wib.strftime('%H:%M')} WIB"
+    except Exception:
+        return iso_utc  # fallback: return raw
 
 
 # Singleton instance
