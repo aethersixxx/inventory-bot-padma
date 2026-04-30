@@ -22,7 +22,7 @@ from src.ai_search import (
     parse_query,
 )
 from src.logger import logger
-from src.sheets import format_item, sheets_client
+from src.sheets import _clean_value, format_item, sheets_client
 
 # ---------- session storage ----------
 # Simpan hasil terakhir per user selama 10 menit, agar bisa kirim "tampilkan semua"
@@ -477,14 +477,14 @@ def _format_compact(
 
     lines = []
     for i, row in enumerate(rows, start=start_index):
-        nama = str(row.get("Nama Mesin", "")).strip() or "-"
-        model = str(row.get("Model", "")).strip()
-        tipe = str(row.get("Tipe Mesin", "")).strip()
-        lokasi = str(row.get("Lokasi", "")).strip() or "-"
-        pn = str(row.get("Part Number", "")).strip()
-        sn = str(row.get("Serial Number", "")).strip()
-        status = str(row.get("Status", "")).strip()
-        status_terakhir = str(row.get("Status Terakhir", "")).strip()
+        nama = _clean_value(row.get("Nama Mesin", "")) or "-"
+        model = _clean_value(row.get("Model", ""))
+        tipe = _clean_value(row.get("Tipe Mesin", ""))
+        lokasi = _clean_value(row.get("Lokasi", "")) or "-"
+        pn = _clean_value(row.get("Part Number", ""))
+        sn = _clean_value(row.get("Serial Number", ""))
+        status = _clean_value(row.get("Status", ""))
+        status_terakhir = _clean_value(row.get("Status Terakhir", ""))
 
         emoji = _status_emoji(status)
 
@@ -528,8 +528,7 @@ def _format_detail(row: dict) -> str:
     Format detail penuh untuk satu item. Dipakai saat user tap tombol "Detail".
     Menampilkan semua 10 field rapi.
     """
-    nama = str(row.get("Nama Mesin", "")).strip() or "-"
-    status = str(row.get("Status", "")).strip()
+    status = _clean_value(row.get("Status", ""))
     emoji = _status_emoji(status)
 
     fields = [
@@ -547,7 +546,7 @@ def _format_detail(row: dict) -> str:
 
     lines = [f"{emoji} *Detail Barang*", "━━━━━━━━━━━━━━━━━━"]
     for label, key in fields:
-        value = str(row.get(key, "")).strip()
+        value = _clean_value(row.get(key, ""))
         if not value:
             value = "-"
         # PN & SN pakai code formatting
